@@ -1,0 +1,357 @@
+#!/usr/bin/env perl
+
+=encoding utf8
+
+=head1 NAME
+
+git-locust - B<L>ines B<O>f B<C>ode B<U>h, B<S>omething... B<T>ime!
+
+=head1 VERSION
+
+Version 0.0.0
+
+=head1 USAGE
+
+git locust [options]
+git locust --clean [options]
+git locust --help [options]
+
+=head1 DESCRIPTION
+
+git-locust creates a graph of LOC in a repo over time.
+
+=head1 OPTIONS
+
+=head2 General Options
+
+=over
+
+=item B<--clean> B<-c>
+
+Remove git-locust's data from a previous run.
+
+=item B<--directory> I<DIR> B<-C> I<DIR>
+
+Specify the directory in which to measure, i.e. the repository. Default: F<.>
+
+=item B<--help> B<-h> B<-?>
+
+Print help and exits.
+
+=item B<--verbose> B<-v>
+
+Increase verbosity. Can be repeated.
+
+=back
+
+=head2 Measuring Options
+
+=over
+
+=item B<--branch> I<BRANCH> B<-b> I<BRANCH>
+
+Specify the branch from which to start measuring. Default: B<master>
+
+=item B<--exclude> I<DIRS> B<-e> I<DIRS>
+
+Exclude some directory I<names> from being measured. I<DIRS> is a
+comma-separated list of names. Can be repeated.
+
+=item B<--step> I<N> B<-s> I<N>
+
+Only measure every I<N>th revision.
+
+=back
+
+=head2 Output Options
+
+=over
+
+=item B<--output> I<FILE> B<-o> I<FILE>
+
+Where to print the output. Default: F<locust.html>
+
+=back
+
+=head1 REQUIRED ARGUMENTS
+
+=head1 CONFIGURATION
+
+=head1 EXIT STATUS
+
+0 if everything went well.
+
+=head1 BUGS AND LIMITATIONS
+
+Please report any bugs or feature requests at
+L<https://github.com/Munkei/git-locust/issues>.
+
+=head1 INCOMPATIBILITIES
+
+=head1 DEPENDENCIES
+
+=head1 DIAGNOSTICS
+
+=head1 AUTHOR
+
+Theo 'Biffen' Willows, C<< <theo@willows.se> >>
+
+=head1 LICENSE AND COPYRIGHT
+
+Copyright (C) 2016 Theo Willows
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of either: the GNU General Public License as published by the Free
+Software Foundation; or the Artistic License.
+
+See L<http://dev.perl.org/licenses/> for more information.
+
+=cut
+
+use open qw( :std :encoding(UTF-8) );
+use strict;
+use utf8;
+use v5.20;
+use warnings;
+
+use Carp;
+use Getopt::Long qw( :config
+  no_ignore_case
+  bundling
+);
+use Git;
+use IO::All -utf8;
+use JSON::MaybeXS;
+use Pod::Usage;
+use Readonly;
+use Term::ANSIColor;
+use YAML::Any qw( LoadFile );
+
+use feature qw( signatures );
+no warnings qw( experimental::signatures );
+
+our $VERSION = v0.0.0;
+
+Readonly::Scalar my $BAR_BASE     => 0x2588;
+Readonly::Scalar my $BAR_NUM      => 8;
+Readonly::Scalar my $GIT_REV_SIZE => 7;
+Readonly::Scalar my $WIDTH        => 80;
+
+sub bar( $part, $width ) {
+  my $str = '█' x ( $part * $width );
+  my $div = ( ( $part * $width ) - int( $part * $width ) ) * $BAR_NUM;
+  $str .= chr( $BAR_BASE + ( $BAR_NUM - $div ) ) if $div;
+  my $remaining = ( $width - length( $str ) );
+  $str .= ' ' x $remaining if $remaining > 0;
+  return $str;
+}
+
+my $branch = 'master';
+my $clean  = 0;
+my $dir    = '.';
+my @exclude;
+my $help        = 0;
+my $output_file = 'locust.html';
+my $step        = 1;
+my $verbosity   = 0;
+
+GetOptions(
+  'branch|b=s'    => \$branch,
+  'clean|c'       => \$clean,
+  'directory|C=s' => \$dir,
+  'exclude|e=s'   => \@exclude,
+  'help|h|?'      => \$help,
+  'output|o=s'    => \$output_file,
+  'step|s=i'      => \$step,
+  'verbose|v+'    => \$verbosity,
+  )
+  or pod2usage(
+  -exitval => 1,
+  -verbose => 0,
+  );
+
+pod2usage(
+  -exitval => 0,
+  -verbose => $verbosity + 1,
+) if $help;
+
+die "Step must be greater than 0\n"
+  if $step <= 0;
+
+@exclude = split( /,/, join( ',', @exclude ) );
+my $output     = io->file( $output_file );
+my $locust_dir = io->dir( "$dir/.locust" );
+
+if ( $clean ) {
+  print "Deleting ‘$locust_dir’";
+  $locust_dir->rmtree;
+  say colored( ' ✓', 'green' );
+  exit 0;
+}
+
+# Prepare
+my $repo;
+my @revs;
+{
+  $repo = Git->repository(
+    Directory => $dir,
+  );
+  @revs = reverse $repo->command( 'rev-list', $branch );
+
+  if ( $step != 1 ) {
+    my $i = 0;
+    @revs = grep { not ++$i % $step } @revs;
+  }
+}
+
+# Clone
+my $clone;
+my $clone_dir;
+{
+  $clone_dir = io->dir( "$locust_dir/clone" );
+  print 'Cloning';
+  unless ( $clone_dir->exists ) {
+    Git::command( [ 'clone', $dir, $clone_dir->name ], STDERR => 0 );
+  }
+  $clone = Git->repository(
+    Directory => $clone_dir->name,
+  );
+  $clone->command(
+    [ 'fetch',                   '--all',
+      '--prune',                 '--no-tags',
+      '--no-recurse-submodules', '--quiet'
+    ],
+    STDERR => 0
+  );
+  say colored( ' ✓', 'green' );
+}
+
+# Measure
+my %data;
+my %langs;
+{
+  say 'Measuring';
+
+  my $data_dir = io->dir( "$locust_dir/data" );
+  $data_dir->mkdir unless $data_dir->exists;
+
+  my $i = 0;
+  while ( $i < @revs ) {
+    my $rev  = $revs[$i];
+    my $file = io->file( "$data_dir/$rev.yml" );
+    unless ( $file->exists ) {
+      $clone->command( [ 'checkout', $rev ], STDERR => 0 );
+      my @args = (
+        'cloc',    '--progress-rate=0',
+        '--quiet', '--yaml',
+        '--report-file=' . $file->name,
+      );
+      push @args, '--exclude-dir=' . join ',', @exclude if @exclude;
+      push @args, $clone_dir->name;
+      system( @args ) == 0
+        or croak;
+      $file->touch;
+    }
+
+    my ( $rev_data ) = LoadFile( $file->name );
+    $data{$rev} = $rev_data;
+    for my $lang ( keys %{$rev_data} ) {
+      next if $lang eq 'header';
+      $langs{$lang} = 0;
+    }
+
+    ++$i;
+
+    my $progress
+      = ( ' ' x ( ( length( scalar( @revs ) ) - length( $i ) ) + 1 ) )
+      . $i . '/'
+      . scalar( @revs ) . ' ';
+    print $progress
+      . colored(
+      bar( $i / @revs, ( $WIDTH - length( $progress ) ) ),
+      ( $i < @revs
+        ? 'blue on_magenta'
+        : 'green'
+      ) ) . "\r";
+  }
+  say '';
+}
+
+# Make chart
+{
+  print 'Making chart';
+  my @chart_data;
+  push @chart_data, [ 'Commit', sort keys %langs ];
+  for my $rev ( @revs ) {
+    my @line = ( substr $rev, 0, $GIT_REV_SIZE );
+    for my $lang ( sort keys %langs ) {
+      push @line, int( $data{$rev}->{$lang}->{code} // 0 );
+    }
+    push @chart_data, [@line];
+  }
+
+  my %chart_options = (
+    curveType           => 'none',
+    enableInteractivity => 1,
+    legend              => {
+      position => 'bottom',
+    },
+
+    # theme => 'maximized',
+    title => 'Lines of Code',
+  );
+
+  my %json = (
+    data    => encode_json( \@chart_data ),
+    options => encode_json( \%chart_options ),
+  );
+
+  while ( <DATA> ) {
+    $output->print( s/__(\w+)__/$json{$1}/er );
+  }
+  say colored( ' ✓', 'green' );
+  say 'Wrote ‘' . $output->name . '’';
+}
+
+__DATA__
+<!DOCTYPE html>
+  <html>
+
+  <head>
+  <script src="https://www.gstatic.com/charts/loader.js"
+  type="text/javascript" ></script>
+  <script type="text/javascript" >
+  google.charts.load('current', {
+    'packages': ['corechart']
+  });
+google.charts.setOnLoadCallback(drawChart);
+
+function drawChart() {
+  var data = google.visualization.arrayToDataTable(__data__);
+
+  var options = __options__;
+
+  var chart = new google.visualization.LineChart(
+    document.getElementById('chart')
+   );
+
+  chart.draw(data, options);
+}
+</script>
+  <style>
+  body, html,                   #chart {
+ height:   100%;
+margin:   0;
+overflow: hidden;
+padding:  0;
+width:    100%;
+}
+  </style>
+  <title>Lines of Code</title>
+  </head>
+
+  <body>
+  <div id="chart" ></div>
+  </body>
+
+  </html>

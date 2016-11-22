@@ -1,0 +1,4 @@
+severity = cruel
+theme    = core
+verbose  = 11
+exclude  = ControlStructures::ProhibitPostfixControls ControlStructures::ProhibitUnlessBlocks Modules::ProhibitExcessMainComplexity Modules::RequireVersionVar RegularExpressions::RequireDotMatchAnything RegularExpressions::RequireExtendedFormatting RegularExpressions::RequireLineBoundaryMatching Subroutines::ProhibitSubroutinePrototypes TestingAndDebugging::ProhibitNoWarnings ValuesAndExpressions::ProhibitEmptyQuotes ValuesAndExpressions::ProhibitNoisyQuotes ValuesAndExpressions::ProhibitVersionStrings

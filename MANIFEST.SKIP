@@ -1,0 +1,12 @@
+.*~
+.git/
+.gitignore
+.perlcriticrc
+.travis.yml
+MANIFEST.bak
+^MYMETA\.json$
+^MYMETA\.yml$
+_build/
+blib/
+project.json
+xt/
